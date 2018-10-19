@@ -204,6 +204,18 @@ def parameter_to_arg(parameters, consumes, function, pythonic_params=False, pass
         if pass_context_arg_name and (has_kwargs or pass_context_arg_name in arguments):
             kwargs[pass_context_arg_name] = request.context
 
+        ### Start Leia specific
+        # Add token to each query if present
+        try:
+            kwargs['token'] = request.headers['token']
+        except KeyError:
+            pass
+
+        # Copy query parameters to model_params for use in models_controller.apply_model
+        if function.__name__ == 'apply_model' and len(query) != 0:
+            kwargs['model_params'] = query
+        ### End Leia specific
+
         return function(**kwargs)
 
     return wrapper
