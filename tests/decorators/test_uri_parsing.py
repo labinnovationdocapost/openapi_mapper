@@ -1,6 +1,6 @@
+import pytest
 from werkzeug.datastructures import MultiDict
 
-import pytest
 from connexion.decorators.uri_parsing import (AlwaysMultiURIParser,
                                               FirstValueURIParser,
                                               Swagger2URIParser)
@@ -40,7 +40,8 @@ def test_uri_parser_query_params(parser_class, expected, query_in, collection_fo
          "items": {"type": "string"},
          "collectionFormat": collection_format}
     ]
-    p = parser_class(parameters)
+    body_defn = {}
+    p = parser_class(parameters, body_defn)
     res = p(lambda x: x)(request)
     assert res.query["letters"] == expected
 
@@ -69,7 +70,8 @@ def test_uri_parser_form_params(parser_class, expected, query_in, collection_for
          "items": {"type": "string"},
          "collectionFormat": collection_format}
     ]
-    p = parser_class(parameters)
+    body_defn = {}
+    p = parser_class(parameters, body_defn)
     res = p(lambda x: x)(request)
     assert res.form["letters"] == expected
 
@@ -95,6 +97,7 @@ def test_uri_parser_path_params(parser_class, expected, query_in, collection_for
          "items": {"type": "string"},
          "collectionFormat": collection_format}
     ]
-    p = parser_class(parameters)
+    body_defn = {}
+    p = parser_class(parameters, body_defn)
     res = p(lambda x: x)(request)
     assert res.path_params["letters"] == expected

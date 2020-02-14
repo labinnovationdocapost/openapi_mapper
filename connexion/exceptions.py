@@ -1,3 +1,5 @@
+import warnings
+from jsonschema.exceptions import ValidationError
 from werkzeug.exceptions import Forbidden, Unauthorized
 
 from .problem import problem
@@ -23,6 +25,9 @@ class ProblemException(ConnexionException):
         self.ext = ext
 
     def to_problem(self):
+        warnings.warn(
+            "'to_problem' is planned to be removed in a future release. "
+            "Call connexion.problem.problem(..) instead to maintain the existing error response.", DeprecationWarning)
         return problem(status=self.status, title=self.title, detail=self.detail,
                        type=self.type, instance=self.instance, headers=self.headers,
                        ext=self.ext)
@@ -47,27 +52,17 @@ class ResolverError(LookupError):
         return '<ResolverError: {}>'.format(self.reason)
 
 
-class InvalidSpecification(ConnexionException):
-    def __init__(self, reason='Unknown Reason'):
-        """
-        :param reason: Reason why the specification is invalid
-        :type reason: str
-        """
-        self.reason = reason
-
-    def __str__(self):  # pragma: no cover
-        return '<InvalidSpecification: {}>'.format(self.reason)
-
-    def __repr__(self):  # pragma: no cover
-        return '<InvalidSpecification: {}>'.format(self.reason)
+class InvalidSpecification(ConnexionException, ValidationError):
+    pass
 
 
-class NonConformingResponse(ConnexionException):
+class NonConformingResponse(ProblemException):
     def __init__(self, reason='Unknown Reason', message=None):
         """
         :param reason: Reason why the response did not conform to the specification
         :type reason: str
         """
+        super(NonConformingResponse, self).__init__(status=500, title=reason, detail=message)
         self.reason = reason
         self.message = message
 
@@ -76,6 +71,30 @@ class NonConformingResponse(ConnexionException):
 
     def __repr__(self):  # pragma: no cover
         return '<NonConformingResponse: {}>'.format(self.reason)
+
+
+class AuthenticationProblem(ProblemException):
+
+    def __init__(self, status, title, detail):
+        super(AuthenticationProblem, self).__init__(status=status, title=title, detail=detail)
+
+
+class ResolverProblem(ProblemException):
+
+    def __init__(self, status, title, detail):
+        super(ResolverProblem, self).__init__(status=status, title=title, detail=detail)
+
+
+class BadRequestProblem(ProblemException):
+
+    def __init__(self, title='Bad Request', detail=None):
+        super(BadRequestProblem, self).__init__(status=400, title=title, detail=detail)
+
+
+class UnsupportedMediaTypeProblem(ProblemException):
+
+    def __init__(self, title="Unsupported Media Type", detail=None):
+        super(UnsupportedMediaTypeProblem, self).__init__(status=415, title=title, detail=detail)
 
 
 class NonConformingResponseBody(NonConformingResponse):
@@ -92,7 +111,7 @@ class OAuthProblem(Unauthorized):
     pass
 
 
-class OAuthResponseProblem(Unauthorized):
+class OAuthResponseProblem(OAuthProblem):
     def __init__(self, token_response, **kwargs):
         self.token_response = token_response
         super(OAuthResponseProblem, self).__init__(**kwargs)
@@ -102,7 +121,6 @@ class OAuthScopeProblem(Forbidden):
     def __init__(self, token_scopes, required_scopes, **kwargs):
         self.required_scopes = required_scopes
         self.token_scopes = token_scopes
-        self.missing_scopes = required_scopes - token_scopes
 
         super(OAuthScopeProblem, self).__init__(**kwargs)
 

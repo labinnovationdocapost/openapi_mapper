@@ -1,15 +1,21 @@
 import math
 
-import connexion.apps
 import pytest
-from connexion import utils
 from mock import MagicMock
+
+import connexion.apps
+from connexion import utils
 
 
 def test_get_function_from_name():
     function = utils.get_function_from_name('math.ceil')
     assert function == math.ceil
     assert function(2.7) == 3
+
+
+def test_get_function_from_name_no_module():
+    with pytest.raises(ValueError):
+        utils.get_function_from_name('math')
 
 
 def test_get_function_from_name_attr_error(monkeypatch):
@@ -45,3 +51,13 @@ def test_boolean():
 
     with pytest.raises(ValueError):
         utils.boolean(None)
+
+
+def test_deep_get_dict():
+    obj = {'type': 'object', 'properties': {'id': {'type': 'string'}}}
+    assert utils.deep_get(obj, ['properties', 'id']) == {'type': 'string'}
+
+
+def test_deep_get_list():
+    obj = [{'type': 'object', 'properties': {'id': {'type': 'string'}}}]
+    assert utils.deep_get(obj, ['0', 'properties', 'id']) == {'type': 'string'}

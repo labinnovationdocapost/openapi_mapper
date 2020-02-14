@@ -1,26 +1,23 @@
 import abc
-import copy
 import logging
 import pathlib
 import sys
-from typing import AnyStr, List  # NOQA
+import warnings
+from enum import Enum
 
-import jinja2
-import six
-import yaml
-from swagger_spec_validator.validator20 import validate_spec
-
+from ..decorators.produces import NoContent
 from ..exceptions import ResolverError
-from ..operation import Operation
+from ..http_facts import METHODS
+from ..jsonifier import Jsonifier
+from ..lifecycle import ConnexionResponse
+from ..operations import make_operation
 from ..options import ConnexionOptions
 from ..resolver import Resolver
-from ..utils import Jsonifier
+from ..spec import Specification
+from ..utils import is_json_mimetype
 
 MODULE_PATH = pathlib.Path(__file__).absolute().parent.parent
-SWAGGER_UI_PATH = MODULE_PATH / 'vendor' / 'swagger-ui'
 SWAGGER_UI_URL = 'ui'
-
-RESOLVER_ERROR_ENDPOINT_RANDOM_DIGITS = 6
 
 logger = logging.getLogger('connexion.apis.abstract')
 
@@ -32,8 +29,7 @@ class AbstractAPIMeta(abc.ABCMeta):
         cls._set_jsonifier()
 
 
-@six.add_metaclass(AbstractAPIMeta)
-class AbstractAPI(object):
+class AbstractAPI(metaclass=AbstractAPIMeta):
     """
     Defines an abstract interface for a Swagger API
     """
@@ -41,8 +37,7 @@ class AbstractAPI(object):
     def __init__(self, specification, base_path=None, arguments=None,
                  validate_responses=False, strict_validation=False, resolver=None,
                  auth_all_paths=False, debug=False, resolver_error_handler=None,
-                 validator_map=None, pythonic_params=False, options=None, pass_context_arg_name=None,
-                 **old_style_options):
+                 validator_map=None, pythonic_params=False, pass_context_arg_name=None, options=None):
         """
         :type specification: pathlib.Path | dict
         :type base_path: str | None
@@ -65,70 +60,39 @@ class AbstractAPI(object):
         :param pass_context_arg_name: If not None URL request handling functions with an argument matching this name
         will be passed the framework's request context.
         :type pass_context_arg_name: str | None
-        :param old_style_options: Old style options support for backward compatibility. Preference is
-                                  what is defined in `options` parameter.
         """
         self.debug = debug
         self.validator_map = validator_map
         self.resolver_error_handler = resolver_error_handler
 
-        self.options = ConnexionOptions(old_style_options)
-        # options is added last to preserve the highest priority
-        self.options = self.options.extend(options)
-
-        # TODO: Remove this in later versions (Current version is 1.1.9)
-        if base_path is None and 'base_url' in old_style_options:
-            base_path = old_style_options['base_url']
-            logger.warning("Parameter base_url should be no longer used. Use base_path instead.")
-
         logger.debug('Loading specification: %s', specification,
                      extra={'swagger_yaml': specification,
                             'base_path': base_path,
                             'arguments': arguments,
-                            'swagger_ui': self.options.openapi_console_ui_available,
-                            'swagger_path': self.options.openapi_console_ui_from_dir,
-                            'swagger_url': self.options.openapi_console_ui_path,
                             'auth_all_paths': auth_all_paths})
 
-        if isinstance(specification, dict):
-            self.specification = specification
-        else:
-            specification_path = pathlib.Path(specification)
-            self.specification = self.load_spec_from_file(arguments, specification_path)
+        # Avoid validator having ability to modify specification
+        self.specification = Specification.load(specification, arguments=arguments)
 
-        self.specification = compatibility_layer(self.specification)
         logger.debug('Read specification', extra={'spec': self.specification})
 
-        # Avoid validator having ability to modify specification
-        spec = copy.deepcopy(self.specification)
-        self._validate_spec(spec)
+        self.options = ConnexionOptions(options, oas_version=self.specification.version)
 
-        # https://github.com/swagger-api/swagger-spec/blob/master/versions/2.0.md#fixed-fields
-        # If base_path is not on provided then we try to read it from the swagger.yaml or use / by default
+        logger.debug('Options Loaded',
+                     extra={'swagger_ui': self.options.openapi_console_ui_available,
+                            'swagger_path': self.options.openapi_console_ui_from_dir,
+                            'swagger_url': self.options.openapi_console_ui_path})
+
         self._set_base_path(base_path)
 
-        # A list of MIME types the APIs can produce. This is global to all APIs but can be overridden on specific
-        # API calls.
-        self.produces = self.specification.get('produces', list())  # type: List[str]
-
-        # A list of MIME types the APIs can consume. This is global to all APIs but can be overridden on specific
-        # API calls.
-        self.consumes = self.specification.get('consumes', ['application/json'])  # type: List[str]
-
-        self.security = self.specification.get('security')
-        self.security_definitions = self.specification.get('securityDefinitions', dict())
-        logger.debug('Security Definitions: %s', self.security_definitions)
-
-        self.definitions = self.specification.get('definitions', {})
-        self.parameter_definitions = self.specification.get('parameters', {})
-        self.response_definitions = self.specification.get('responses', {})
+        logger.debug('Security Definitions: %s', self.specification.security_definitions)
 
         self.resolver = resolver or Resolver()
 
         logger.debug('Validate Responses: %s', str(validate_responses))
         self.validate_responses = validate_responses
 
-        logger.debug('Strict Request Validation: %s', str(validate_responses))
+        logger.debug('Strict Request Validation: %s', str(strict_validation))
         self.strict_validation = strict_validation
 
         logger.debug('Pythonic params: %s', str(pythonic_params))
@@ -138,7 +102,8 @@ class AbstractAPI(object):
         self.pass_context_arg_name = pass_context_arg_name
 
         if self.options.openapi_spec_available:
-            self.add_swagger_json()
+            self.add_openapi_json()
+            self.add_openapi_yaml()
 
         if self.options.openapi_console_ui_available:
             self.add_swagger_ui()
@@ -146,23 +111,24 @@ class AbstractAPI(object):
         self.add_paths()
 
         if auth_all_paths:
-            self.add_auth_on_not_found(self.security, self.security_definitions)
+            self.add_auth_on_not_found(
+                self.specification.security,
+                self.specification.security_definitions
+            )
 
-    def _validate_spec(self, spec):
-        validate_spec(spec)
-
-    def _set_base_path(self, base_path):
-        # type: (AnyStr) -> None
-        if base_path is None:
-            self.base_path = canonical_base_path(self.specification.get('basePath', ''))
+    def _set_base_path(self, base_path=None):
+        if base_path is not None:
+            # update spec to include user-provided base_path
+            self.specification.base_path = base_path
+            self.base_path = base_path
         else:
-            self.base_path = canonical_base_path(base_path)
-            self.specification['basePath'] = base_path
+            self.base_path = self.specification.base_path
 
     @abc.abstractmethod
-    def add_swagger_json(self):
+    def add_openapi_json(self):
         """
-        Adds swagger json to {base_path}/swagger.json
+        Adds openapi spec to {base_path}/openapi.json
+             (or {base_path}/swagger.json for swagger2)
         """
 
     @abc.abstractmethod
@@ -177,7 +143,7 @@ class AbstractAPI(object):
         Adds a 404 error handler to authenticate and only expose the 404 status if the security validation pass.
         """
 
-    def add_operation(self, method, path, swagger_operation, path_parameters):
+    def add_operation(self, path, method):
         """
         Adds one operation to the api.
 
@@ -192,27 +158,20 @@ class AbstractAPI(object):
 
         :type method: str
         :type path: str
-        :type swagger_operation: dict
         """
-        operation = Operation(self,
-                              method=method,
-                              path=path,
-                              path_parameters=path_parameters,
-                              operation=swagger_operation,
-                              app_produces=self.produces,
-                              app_consumes=self.consumes,
-                              app_security=self.security,
-                              security_definitions=self.security_definitions,
-                              definitions=self.definitions,
-                              parameter_definitions=self.parameter_definitions,
-                              response_definitions=self.response_definitions,
-                              validate_responses=self.validate_responses,
-                              validator_map=self.validator_map,
-                              strict_validation=self.strict_validation,
-                              resolver=self.resolver,
-                              pythonic_params=self.pythonic_params,
-                              uri_parser_class=self.options.uri_parser_class,
-                              pass_context_arg_name=self.pass_context_arg_name)
+        operation = make_operation(
+            self.specification,
+            self,
+            path,
+            method,
+            self.resolver,
+            validate_responses=self.validate_responses,
+            validator_map=self.validator_map,
+            strict_validation=self.strict_validation,
+            pythonic_params=self.pythonic_params,
+            uri_parser_class=self.options.uri_parser_class,
+            pass_context_arg_name=self.pass_context_arg_name
+        )
         self._add_operation_internal(method, path, operation)
 
     @abc.abstractmethod
@@ -226,19 +185,11 @@ class AbstractAPI(object):
         """
         Adds a handler for ResolverError for the given method and path.
         """
-        operation = self.resolver_error_handler(err,
-                                                method=method,
-                                                path=path,
-                                                app_produces=self.produces,
-                                                app_security=self.security,
-                                                security_definitions=self.security_definitions,
-                                                definitions=self.definitions,
-                                                parameter_definitions=self.parameter_definitions,
-                                                response_definitions=self.response_definitions,
-                                                validate_responses=self.validate_responses,
-                                                strict_validation=self.strict_validation,
-                                                resolver=self.resolver,
-                                                randomize_endpoint=RESOLVER_ERROR_ENDPOINT_RANDOM_DIGITS)
+        operation = self.resolver_error_handler(
+            err,
+            security=self.specification.security,
+            security_definitions=self.specification.security_definitions
+        )
         self._add_operation_internal(method, path, operation)
 
     def add_paths(self, paths=None):
@@ -251,15 +202,11 @@ class AbstractAPI(object):
         for path, methods in paths.items():
             logger.debug('Adding %s%s...', self.base_path, path)
 
-            # search for parameters definitions in the path level
-            # http://swagger.io/specification/#pathItemObject
-            path_parameters = methods.get('parameters', [])
-
-            for method, endpoint in methods.items():
-                if method == 'parameters':
+            for method in methods:
+                if method not in METHODS:
                     continue
                 try:
-                    self.add_operation(method, path, endpoint, path_parameters)
+                    self.add_operation(path, method)
                 except ResolverError as err:
                     # If we have an error handler for resolver errors, add it as an operation.
                     # Otherwise treat it as any other error.
@@ -280,20 +227,8 @@ class AbstractAPI(object):
             logger.exception(error_msg)
         else:
             logger.error(error_msg)
-            six.reraise(*exc_info)
-
-    def load_spec_from_file(self, arguments, specification):
-        arguments = arguments or {}
-
-        with specification.open(mode='rb') as swagger_yaml:
-            contents = swagger_yaml.read()
-            try:
-                swagger_template = contents.decode()
-            except UnicodeDecodeError:
-                swagger_template = contents.decode('utf-8', 'replace')
-
-            swagger_string = jinja2.Template(swagger_template).render(**arguments)
-            return yaml.safe_load(swagger_string)  # type: dict
+            _type, value, traceback = exc_info
+            raise value.with_traceback(traceback)
 
     @classmethod
     @abc.abstractmethod
@@ -306,55 +241,206 @@ class AbstractAPI(object):
     @abc.abstractmethod
     def get_response(self, response, mimetype=None, request=None):
         """
-        This method converts the ConnexionResponse to a user framework response.
-        :param response: A response to cast.
+        This method converts a handler response to a framework response.
+        This method should just retrieve response from handler then call `cls._get_response`.
+        It is mainly here to handle AioHttp async handler.
+        :param response: A response to cast (tuple, framework response, etc).
         :param mimetype: The response mimetype.
+        :type mimetype: Union[None, str]
         :param request: The request associated with this response (the user framework request).
-
-        :type response: ConnexionResponse
-        :type mimetype: str
         """
 
     @classmethod
+    def _get_response(cls, response, mimetype=None, extra_context=None):
+        """
+        This method converts a handler response to a framework response.
+        The response can be a ConnexionResponse, an operation handler, a framework response or a tuple.
+        Other type than ConnexionResponse are handled by `cls._response_from_handler`
+        :param response: A response to cast (tuple, framework response, etc).
+        :param mimetype: The response mimetype.
+        :type mimetype: Union[None, str]
+        :param extra_context: dict of extra details, like url, to include in logs
+        :type extra_context: Union[None, dict]
+        """
+        if extra_context is None:
+            extra_context = {}
+        logger.debug('Getting data and status code',
+                     extra={
+                         'data': response,
+                         'data_type': type(response),
+                         **extra_context
+                     })
+
+        if isinstance(response, ConnexionResponse):
+            framework_response = cls._connexion_to_framework_response(response, mimetype, extra_context)
+        else:
+            framework_response = cls._response_from_handler(response, mimetype, extra_context)
+
+        logger.debug('Got framework response',
+                     extra={
+                         'response': framework_response,
+                         'response_type': type(framework_response),
+                         **extra_context
+                     })
+        return framework_response
+
+    @classmethod
+    def _response_from_handler(cls, response, mimetype, extra_context=None):
+        """
+        Create a framework response from the operation handler data.
+        An operation handler can return:
+        - a framework response
+        - a body (str / binary / dict / list), a response will be created
+            with a status code 200 by default and empty headers.
+        - a tuple of (body: str, status_code: int)
+        - a tuple of (body: str, status_code: int, headers: dict)
+        :param response: A response from an operation handler.
+        :type response Union[Response, str, Tuple[str,], Tuple[str, int], Tuple[str, int, dict]]
+        :param mimetype: The response mimetype.
+        :type mimetype: str
+        :param extra_context: dict of extra details, like url, to include in logs
+        :type extra_context: Union[None, dict]
+        :return A framework response.
+        :rtype Response
+        """
+        if cls._is_framework_response(response):
+            return response
+
+        if isinstance(response, tuple):
+            len_response = len(response)
+            if len_response == 1:
+                data, = response
+                return cls._build_response(mimetype=mimetype, data=data, extra_context=extra_context)
+            if len_response == 2:
+                if isinstance(response[1], (int, Enum)):
+                    data, status_code = response
+                    return cls._build_response(mimetype=mimetype, data=data, status_code=status_code, extra_context=extra_context)
+                else:
+                    data, headers = response
+                return cls._build_response(mimetype=mimetype, data=data, headers=headers, extra_context=extra_context)
+            elif len_response == 3:
+                data, status_code, headers = response
+                return cls._build_response(mimetype=mimetype, data=data, status_code=status_code, headers=headers, extra_context=extra_context)
+            else:
+                raise TypeError(
+                    'The view function did not return a valid response tuple.'
+                    ' The tuple must have the form (body), (body, status, headers),'
+                    ' (body, status), or (body, headers).'
+                )
+        else:
+            return cls._build_response(mimetype=mimetype, data=response, extra_context=extra_context)
+
+    @classmethod
+    def get_connexion_response(cls, response, mimetype=None):
+        """ Cast framework dependent response to ConnexionResponse used for schema validation """
+        if isinstance(response, ConnexionResponse):
+            # If body in ConnexionResponse is not byte, it may not pass schema validation.
+            # In this case, rebuild response with aiohttp to have consistency
+            if response.body is None or isinstance(response.body, bytes):
+                return response
+            else:
+                response = cls._build_response(
+                    data=response.body,
+                    mimetype=mimetype,
+                    content_type=response.content_type,
+                    headers=response.headers,
+                    status_code=response.status_code
+                )
+
+        if not cls._is_framework_response(response):
+            response = cls._response_from_handler(response, mimetype)
+        return cls._framework_to_connexion_response(response=response, mimetype=mimetype)
+
+    @classmethod
     @abc.abstractmethod
-    def get_connexion_response(cls, response):
+    def _is_framework_response(cls, response):
+        """ Return True if `response` is a framework response class """
+
+    @classmethod
+    @abc.abstractmethod
+    def _framework_to_connexion_response(cls, response, mimetype):
+        """ Cast framework response class to ConnexionResponse used for schema validation """
+
+    @classmethod
+    @abc.abstractmethod
+    def _connexion_to_framework_response(cls, response, mimetype, extra_context=None):
+        """ Cast ConnexionResponse to framework response class """
+
+    @classmethod
+    @abc.abstractmethod
+    def _build_response(cls, data, mimetype, content_type=None, status_code=None, headers=None, extra_context=None):
         """
-        This method converts the user framework response to a ConnexionResponse.
-        :param response: A response to cast.
+        Create a framework response from the provided arguments.
+        :param data: Body data.
+        :param content_type: The response mimetype.
+        :type content_type: str
+        :param content_type: The response status code.
+        :type status_code: int
+        :param headers: The response status code.
+        :type headers: Union[Iterable[Tuple[str, str]], Dict[str, str]]
+        :param extra_context: dict of extra details, like url, to include in logs
+        :type extra_context: Union[None, dict]
+        :return A framework response.
+        :rtype Response
         """
+
+    @classmethod
+    def _prepare_body_and_status_code(cls, data, mimetype, status_code=None, extra_context=None):
+        if data is NoContent:
+            data = None
+
+        if status_code is None:
+            if data is None:
+                status_code = 204
+                mimetype = None
+            else:
+                status_code = 200
+        elif hasattr(status_code, "value"):
+            # If we got an enum instead of an int, extract the value.
+            status_code = status_code.value
+
+        if data is not None:
+            body, mimetype = cls._serialize_data(data, mimetype)
+        else:
+            body = data
+
+        if extra_context is None:
+            extra_context = {}
+        logger.debug('Prepared body and status code (%d)',
+                     status_code,
+                     extra={
+                         'body': body,
+                         **extra_context
+                     })
+
+        return body, status_code, mimetype
+
+    @classmethod
+    def _serialize_data(cls, data, mimetype):
+        # TODO: Harmonize with flask_api. Currently this is the backwards compatible with aiohttp_api._cast_body.
+        if not isinstance(data, bytes):
+            if isinstance(mimetype, str) and is_json_mimetype(mimetype):
+                body = cls.jsonifier.dumps(data)
+            elif isinstance(data, str):
+                body = data
+            else:
+                warnings.warn(
+                    "Implicit (aiohttp) serialization with str() will change in the next major version. "
+                    "This is triggered because a non-JSON response body is being stringified. "
+                    "This will be replaced by something that is mimetype-specific and may "
+                    "serialize some things as JSON or throw an error instead of silently "
+                    "stringifying unknown response bodies. "
+                    "Please make sure to specify media/mime types in your specs.",
+                    FutureWarning  # a Deprecation targeted at application users.
+                )
+                body = str(data)
+        else:
+            body = data
+        return body, mimetype
 
     def json_loads(self, data):
         return self.jsonifier.loads(data)
 
     @classmethod
     def _set_jsonifier(cls):
-        import json
-        cls.jsonifier = Jsonifier(json)
-
-
-def canonical_base_path(base_path):
-    """
-    Make given "basePath" a canonical base URL which can be prepended to paths starting with "/".
-    """
-    return base_path.rstrip('/')
-
-
-def compatibility_layer(spec):
-    """Make specs compatible with older versions of Connexion."""
-    if not isinstance(spec, dict):
-        return spec
-
-    # Make all response codes be string
-    for path_name, methods_available in spec.get('paths', {}).items():
-        for method_name, method_def in methods_available.items():
-            if (method_name == 'parameters' or not isinstance(
-                    method_def, dict)):
-                continue
-
-            response_definitions = {}
-            for response_code, response_def in method_def.get(
-                    'responses', {}).items():
-                response_definitions[str(response_code)] = response_def
-
-            method_def['responses'] = response_definitions
-    return spec
+        cls.jsonifier = Jsonifier()

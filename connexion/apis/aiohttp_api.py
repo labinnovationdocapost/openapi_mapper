@@ -1,49 +1,99 @@
 import asyncio
 import logging
 import re
+import traceback
+from contextlib import suppress
+from http import HTTPStatus
 from urllib.parse import parse_qs
 
-import jinja2
-
 import aiohttp_jinja2
+import jinja2
 from aiohttp import web
-from aiohttp.web_exceptions import HTTPNotFound
+from aiohttp.web_exceptions import HTTPNotFound, HTTPPermanentRedirect
+from aiohttp.web_middlewares import normalize_path_middleware
 from connexion.apis.abstract import AbstractAPI
-from connexion.exceptions import OAuthProblem
+from connexion.exceptions import ProblemException
 from connexion.handlers import AuthErrorHandler
+from connexion.jsonifier import JSONEncoder, Jsonifier
 from connexion.lifecycle import ConnexionRequest, ConnexionResponse
-from connexion.utils import Jsonifier, is_json_mimetype
+from connexion.problem import problem
+from connexion.utils import yamldumper
+from werkzeug.exceptions import HTTPException as werkzeug_HTTPException
 
-try:
-    import ujson as json
-    from functools import partial
-    json.dumps = partial(json.dumps, escape_forward_slashes=True)
-
-except ImportError:  # pragma: no cover
-    import json
 
 logger = logging.getLogger('connexion.apis.aiohttp_api')
 
 
+def _generic_problem(http_status: HTTPStatus, exc: Exception = None):
+    extra = None
+    if exc is not None:
+        loop = asyncio.get_event_loop()
+        if loop.get_debug():
+            tb = None
+            with suppress(Exception):
+                tb = traceback.format_exc()
+            if tb:
+                extra = {"traceback": tb}
+
+    return problem(
+        status=http_status.value,
+        title=http_status.phrase,
+        detail=http_status.description,
+        ext=extra,
+    )
+
+
 @web.middleware
 @asyncio.coroutine
-def oauth_problem_middleware(request, handler):
+def problems_middleware(request, handler):
     try:
         response = yield from handler(request)
-    except OAuthProblem as oauth_error:
-        return web.Response(
-            status=oauth_error.code,
-            body=json.dumps(oauth_error.description).encode(),
-            content_type='application/problem+json'
-        )
+    except ProblemException as exc:
+        response = problem(status=exc.status, detail=exc.detail, title=exc.title,
+                           type=exc.type, instance=exc.instance, headers=exc.headers, ext=exc.ext)
+    except (werkzeug_HTTPException, _HttpNotFoundError) as exc:
+        response = problem(status=exc.code, title=exc.name, detail=exc.description)
+    except web.HTTPError as exc:
+        if exc.text == "{}: {}".format(exc.status, exc.reason):
+            detail = HTTPStatus(exc.status).description
+        else:
+            detail = exc.text
+        response = problem(status=exc.status, title=exc.reason, detail=detail)
+    except (
+        web.HTTPException,  # eg raised HTTPRedirection or HTTPSuccessful
+        asyncio.CancelledError,  # skipped in default web_protocol
+    ):
+        # leave this to default handling in aiohttp.web_protocol.RequestHandler.start()
+        raise
+    except asyncio.TimeoutError as exc:
+        # overrides 504 from aiohttp.web_protocol.RequestHandler.start()
+        logger.debug('Request handler timed out.', exc_info=exc)
+        response = _generic_problem(HTTPStatus.GATEWAY_TIMEOUT, exc)
+    except Exception as exc:
+        # overrides 500 from aiohttp.web_protocol.RequestHandler.start()
+        logger.exception('Error handling request', exc_info=exc)
+        response = _generic_problem(HTTPStatus.INTERNAL_SERVER_ERROR, exc)
+
+    if isinstance(response, ConnexionResponse):
+        response = yield from AioHttpApi.get_response(response)
     return response
 
 
 class AioHttpApi(AbstractAPI):
     def __init__(self, *args, **kwargs):
+        # NOTE we use HTTPPermanentRedirect (308) because
+        # clients sometimes turn POST requests into GET requests
+        # on 301, 302, or 303
+        # see https://tools.ietf.org/html/rfc7538
+        trailing_slash_redirect = normalize_path_middleware(
+            append_slash=True,
+            redirect_class=HTTPPermanentRedirect
+        )
         self.subapp = web.Application(
-            debug=kwargs.get('debug', False),
-            middlewares=[oauth_problem_middleware]
+            middlewares=[
+                problems_middleware,
+                trailing_slash_redirect
+            ]
         )
         AbstractAPI.__init__(self, *args, **kwargs)
 
@@ -64,23 +114,71 @@ class AioHttpApi(AbstractAPI):
     def normalize_string(string):
         return re.sub(r'[^a-zA-Z0-9]', '_', string.strip('/'))
 
-    def add_swagger_json(self):
+    def _base_path_for_prefix(self, request):
         """
-        Adds swagger json to {base_path}/swagger.json
+        returns a modified basePath which includes the incoming request's
+        path prefix.
         """
-        logger.debug('Adding swagger.json: %s/swagger.json', self.base_path)
+        base_path = self.base_path
+        if not request.path.startswith(self.base_path):
+            prefix = request.path.split(self.base_path)[0]
+            base_path = prefix + base_path
+        return base_path
+
+    def _spec_for_prefix(self, request):
+        """
+        returns a spec with a modified basePath / servers block
+        which corresponds to the incoming request path.
+        This is needed when behind a path-altering reverse proxy.
+        """
+        base_path = self._base_path_for_prefix(request)
+        return self.specification.with_base_path(base_path).raw
+
+    def add_openapi_json(self):
+        """
+        Adds openapi json to {base_path}/openapi.json
+             (or {base_path}/swagger.json for swagger2)
+        """
+        logger.debug('Adding spec json: %s/%s', self.base_path,
+                     self.options.openapi_spec_path)
         self.subapp.router.add_route(
             'GET',
-            '/swagger.json',
-            self._get_swagger_json
+            self.options.openapi_spec_path,
+            self._get_openapi_json
+        )
+
+    def add_openapi_yaml(self):
+        """
+        Adds openapi json to {base_path}/openapi.json
+             (or {base_path}/swagger.json for swagger2)
+        """
+        if not self.options.openapi_spec_path.endswith("json"):
+            return
+
+        openapi_spec_path_yaml = \
+            self.options.openapi_spec_path[:-len("json")] + "yaml"
+        logger.debug('Adding spec yaml: %s/%s', self.base_path,
+                     openapi_spec_path_yaml)
+        self.subapp.router.add_route(
+            'GET',
+            openapi_spec_path_yaml,
+            self._get_openapi_yaml
         )
 
     @asyncio.coroutine
-    def _get_swagger_json(self, req):
+    def _get_openapi_json(self, request):
         return web.Response(
             status=200,
             content_type='application/json',
-            body=self.jsonifier.dumps(self.specification)
+            body=self.jsonifier.dumps(self._spec_for_prefix(request))
+        )
+
+    @asyncio.coroutine
+    def _get_openapi_yaml(self, request):
+        return web.Response(
+            status=200,
+            content_type='text/yaml',
+            body=yamldumper(self._spec_for_prefix(request))
         )
 
     def add_swagger_ui(self):
@@ -93,7 +191,6 @@ class AioHttpApi(AbstractAPI):
                      console_ui_path)
 
         for path in (
-            console_ui_path,
             console_ui_path + '/',
             console_ui_path + '/index.html',
         ):
@@ -103,16 +200,55 @@ class AioHttpApi(AbstractAPI):
                 self._get_swagger_ui_home
             )
 
+        if self.options.openapi_console_ui_config is not None:
+            self.subapp.router.add_route(
+                'GET',
+                console_ui_path + '/swagger-ui-config.json',
+                self._get_swagger_ui_config
+            )
+
+        # we have to add an explicit redirect instead of relying on the
+        # normalize_path_middleware because we also serve static files
+        # from this dir (below)
+
+        @asyncio.coroutine
+        def redirect(request):
+            raise web.HTTPMovedPermanently(
+                location=self.base_path + console_ui_path + '/'
+            )
+
+        self.subapp.router.add_route(
+            'GET',
+            console_ui_path,
+            redirect
+        )
+
+        # this route will match and get a permission error when trying to
+        # serve index.html, so we add the redirect above.
         self.subapp.router.add_static(
-            console_ui_path + '/',
+            console_ui_path,
             path=str(self.options.openapi_console_ui_from_dir),
             name='swagger_ui_static'
         )
 
-    @aiohttp_jinja2.template('index.html')
+    @aiohttp_jinja2.template('index.j2')
     @asyncio.coroutine
     def _get_swagger_ui_home(self, req):
-        return {'api_url': self.base_path}
+        base_path = self._base_path_for_prefix(req)
+        template_variables = {
+            'openapi_spec_url': (base_path + self.options.openapi_spec_path)
+        }
+        if self.options.openapi_console_ui_config is not None:
+            template_variables['configUrl'] = 'swagger-ui-config.json'
+        return template_variables
+
+    @asyncio.coroutine
+    def _get_swagger_ui_config(self, req):
+        return web.Response(
+            status=200,
+            content_type='text/json',
+            body=self.jsonifier.dumps(self.options.openapi_console_ui_config)
+        )
 
     def add_auth_on_not_found(self, security, security_definitions):
         """
@@ -168,9 +304,9 @@ class AioHttpApi(AbstractAPI):
                      extra={'has_body': req.has_body, 'url': url})
 
         query = parse_qs(req.rel_url.query_string)
-        headers = {k.decode(): v.decode() for k, v in req.raw_headers}
+        headers = req.headers
         body = None
-        if req.can_read_body:
+        if req.body_exists:
             body = yield from req.read()
 
         return ConnexionRequest(url=url,
@@ -189,6 +325,7 @@ class AioHttpApi(AbstractAPI):
         """Get response.
         This method is used in the lifecycle decorators
 
+        :type response: aiohttp.web.StreamResponse | (Any,) | (Any, int) | (Any, dict) | (Any, int, dict)
         :rtype: aiohttp.web.Response
         """
         while asyncio.iscoroutine(response):
@@ -196,68 +333,63 @@ class AioHttpApi(AbstractAPI):
 
         url = str(request.url) if request else ''
 
-        logger.debug('Getting data and status code',
-                     extra={
-                         'data': response,
-                         'url': url
-                     })
-
-        if isinstance(response, ConnexionResponse):
-            response = cls._get_aiohttp_response_from_connexion(response, mimetype)
-
-        logger.debug('Got data and status code (%d)',
-                     response.status, extra={'data': response.body, 'url': url})
-
-        return response
+        return cls._get_response(response, mimetype=mimetype, extra_context={"url": url})
 
     @classmethod
-    def get_connexion_response(cls, response):
+    def _is_framework_response(cls, response):
+        """ Return True if `response` is a framework response class """
+        return isinstance(response, web.StreamResponse)
+
+    @classmethod
+    def _framework_to_connexion_response(cls, response, mimetype):
+        """ Cast framework response class to ConnexionResponse used for schema validation """
         return ConnexionResponse(
             status_code=response.status,
-            mimetype=response.content_type,
+            mimetype=mimetype,
             content_type=response.content_type,
             headers=response.headers,
             body=response.body
         )
 
     @classmethod
-    def _get_aiohttp_response_from_connexion(cls, response, mimetype):
-        content_type = response.content_type if response.content_type else \
-            response.mimetype if response.mimetype else mimetype
-
-        body = cls._cast_body(response.body, content_type)
-
-        return web.Response(
-            status=response.status_code,
-            content_type=content_type,
+    def _connexion_to_framework_response(cls, response, mimetype, extra_context=None):
+        """ Cast ConnexionResponse to framework response class """
+        return cls._build_response(
+            mimetype=response.mimetype or mimetype,
+            status_code=response.status_code,
+            content_type=response.content_type,
             headers=response.headers,
-            body=body
+            data=response.body,
+            extra_context=extra_context,
         )
 
     @classmethod
-    def _cast_body(cls, body, content_type):
-        if not isinstance(body, bytes):
-            if is_json_mimetype(content_type):
-                return json.dumps(body).encode()
+    def _build_response(cls, data, mimetype, content_type=None, headers=None, status_code=None, extra_context=None):
+        if cls._is_framework_response(data):
+            raise TypeError("Cannot return web.StreamResponse in tuple. Only raw data can be returned in tuple.")
 
-            elif isinstance(body, str):
-                return body.encode()
+        data, status_code, serialized_mimetype = cls._prepare_body_and_status_code(data=data, mimetype=mimetype, status_code=status_code, extra_context=extra_context)
 
-            else:
-                return str(body).encode()
+        if isinstance(data, str):
+            text = data
+            body = None
         else:
-            return body
+            text = None
+            body = data
+
+        content_type = content_type or mimetype or serialized_mimetype
+        return web.Response(body=body, text=text, headers=headers, status=status_code, content_type=content_type)
 
     @classmethod
     def _set_jsonifier(cls):
-        cls.jsonifier = Jsonifier(json)
+        cls.jsonifier = Jsonifier(cls=JSONEncoder)
 
 
 class _HttpNotFoundError(HTTPNotFound):
     def __init__(self):
         self.name = 'Not Found'
         self.description = (
-            'The requested URL was not found on the server.  '
+            'The requested URL was not found on the server. '
             'If you entered the URL manually please check your spelling and '
             'try again.'
         )

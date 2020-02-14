@@ -1,7 +1,61 @@
 import functools
 import importlib
 
-import six
+import yaml
+
+
+def boolean(s):
+    '''
+    Convert JSON/Swagger boolean value to Python, raise ValueError otherwise
+
+    >>> boolean('true')
+    True
+
+    >>> boolean('false')
+    False
+    '''
+    if isinstance(s, bool):
+        return s
+    elif not hasattr(s, 'lower'):
+        raise ValueError('Invalid boolean value')
+    elif s.lower() == 'true':
+        return True
+    elif s.lower() == 'false':
+        return False
+    else:
+        raise ValueError('Invalid boolean value')
+
+
+# https://github.com/swagger-api/swagger-spec/blob/master/versions/2.0.md#data-types
+TYPE_MAP = {'integer': int,
+            'number': float,
+            'string': str,
+            'boolean': boolean,
+            'array': list,
+            'object': dict}  # map of swagger types to python types
+
+
+def make_type(value, _type):
+    type_func = TYPE_MAP[_type]  # convert value to right type
+    return type_func(value)
+
+
+def deep_merge(a, b):
+    """ merges b into a
+        in case of conflict the value from b is used
+    """
+    for key in b:
+        if key in a:
+            if isinstance(a[key], dict) and isinstance(b[key], dict):
+                deep_merge(a[key], b[key])
+            elif a[key] == b[key]:
+                pass
+            else:
+                # b overwrites a
+                a[key] = b[key]
+        else:
+            a[key] = b[key]
+    return a
 
 
 def deep_getattr(obj, attr):
@@ -11,6 +65,26 @@ def deep_getattr(obj, attr):
     Stolen from http://pingfive.typepad.com/blog/2010/04/deep-getattr-python-function.html
     """
     return functools.reduce(getattr, attr.split('.'), obj)
+
+
+def deep_get(obj, keys):
+    """
+    Recurses through a nested object get a leaf value.
+
+    There are cases where the use of inheritance or polymorphism-- the use of allOf or
+    oneOf keywords-- will cause the obj to be a list. In this case the keys will
+    contain one or more strings containing integers.
+
+    :type obj: list or dict
+    :type keys: list of strings
+    """
+    if not keys:
+        return obj
+
+    if isinstance(obj, list):
+        return deep_get(obj[int(keys[0])], keys[1:])
+    else:
+        return deep_get(obj[keys[0]], keys[1:])
 
 
 def get_function_from_name(function_name):
@@ -85,30 +159,11 @@ def all_json(mimetypes):
     return all(is_json_mimetype(mimetype) for mimetype in mimetypes)
 
 
-def boolean(s):
-    '''
-    Convert JSON/Swagger boolean value to Python, raise ValueError otherwise
-
-    >>> boolean('true')
-    True
-
-    >>> boolean('false')
-    False
-    '''
-    if isinstance(s, bool):
-        return s
-    elif not hasattr(s, 'lower'):
-        raise ValueError('Invalid boolean value')
-    elif s.lower() == 'true':
-        return True
-    elif s.lower() == 'false':
-        return False
-    else:
-        raise ValueError('Invalid boolean value')
-
-
 def is_nullable(param_def):
-    return param_def.get('x-nullable', False)
+    return (
+        param_def.get('schema', param_def).get('nullable', False) or
+        param_def.get('x-nullable', False)  # swagger2
+    )
 
 
 def is_null(value):
@@ -121,55 +176,74 @@ def is_null(value):
     return False
 
 
-class Jsonifier(object):
-    def __init__(self, json_):
-        self.json = json_
-
-    def dumps(self, data):
-        """ Central point where JSON serialization happens inside
-        Connexion.
-        """
-        return "{}\n".format(self.json.dumps(data, indent=2))
-
-    def loads(self, data):
-        """ Central point where JSON serialization happens inside
-        Connexion.
-        """
-        if isinstance(data, six.binary_type):
-            data = data.decode()
-
-        try:
-            return self.json.loads(data)
-        except Exception as error:
-            if isinstance(data, six.string_types):
-                return data
-
-
 def has_coroutine(function, api=None):
     """
-    Checks if function is a couroutine.
+    Checks if function is a coroutine.
     If ``function`` is a decorator (has a ``__wrapped__`` attribute)
     this function will also look at the wrapped function.
     """
-    if six.PY3:  # pragma: 2.7 no cover
-        import asyncio
+    import asyncio
 
-        def iscorofunc(func):
+    def iscorofunc(func):
+        iscorofunc = asyncio.iscoroutinefunction(func)
+        while not iscorofunc and hasattr(func, '__wrapped__'):
+            func = func.__wrapped__
             iscorofunc = asyncio.iscoroutinefunction(func)
-            while not iscorofunc and hasattr(func, '__wrapped__'):
-                func = func.__wrapped__
-                iscorofunc = asyncio.iscoroutinefunction(func)
-            return iscorofunc
+        return iscorofunc
 
-        if api is None:
-            return iscorofunc(function)
+    if api is None:
+        return iscorofunc(function)
 
-        else:
-            return any(
-                iscorofunc(func) for func in (
-                    function, api.get_request, api.get_response
-                )
+    else:
+        return any(
+            iscorofunc(func) for func in (
+                function, api.get_request, api.get_response
             )
-    else:  # pragma: 3 no cover
-        # there's no asyncio in python 2
+        )
+
+
+def yamldumper(openapi):
+    """
+    Returns a nicely-formatted yaml spec.
+    :param openapi: a spec dictionary.
+    :return: a nicely-formatted, serialized yaml spec.
+    """
+    def should_use_block(value):
+        char_list = (
+          u"\u000a"  # line feed
+          u"\u000d"  # carriage return
+          u"\u001c"  # file separator
+          u"\u001d"  # group separator
+          u"\u001e"  # record separator
+          u"\u0085"  # next line
+          u"\u2028"  # line separator
+          u"\u2029"  # paragraph separator
+        )
+        for c in char_list:
+            if c in value:
+                return True
         return False
+
+    def my_represent_scalar(self, tag, value, style=None):
+        if should_use_block(value):
+            style = '|'
+        else:
+            style = self.default_style
+
+        node = yaml.representer.ScalarNode(tag, value, style=style)
+        if self.alias_key is not None:
+            self.represented_objects[self.alias_key] = node
+        return node
+
+    class NoAnchorDumper(yaml.dumper.SafeDumper):
+        """A yaml Dumper that does not replace duplicate entries
+           with yaml anchors.
+        """
+
+        def ignore_aliases(self, *args):
+            return True
+
+    # Dump long lines as "|".
+    yaml.representer.SafeRepresenter.represent_scalar = my_represent_scalar
+
+    return yaml.dump(openapi, allow_unicode=True, Dumper=NoAnchorDumper)

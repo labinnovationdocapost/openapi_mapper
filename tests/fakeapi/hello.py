@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-import flask
+import datetime
+import uuid
+
 from flask import jsonify, redirect
 
-import connexion
-from connexion import NoContent, ProblemException, problem
+from connexion import NoContent, ProblemException, context, request
 
 
 class DummyClass(object):
@@ -35,6 +36,10 @@ def post():
 
 def post_greeting(name, **kwargs):
     data = {'greeting': 'Hello {name}'.format(name=name)}
+    return data
+
+def post_greeting3(body, **kwargs):
+    data = {'greeting': 'Hello {name}'.format(name=body["name"])}
     return data
 
 def post_greeting_url(name, remainder, **kwargs):
@@ -75,31 +80,33 @@ def get_bye_secure(name, user, token_info):
 
 
 def get_bye_secure_from_flask():
-    return 'Goodbye {user} (Secure!)'.format(user=flask.request.user)
+    return 'Goodbye {user} (Secure!)'.format(user=context['user'])
 
 
-def get_bye_secure_from_connexion():
-    return 'Goodbye {user} (Secure!)'.format(user=connexion.request.user)
+def get_bye_secure_from_connexion(req_context):
+    return 'Goodbye {user} (Secure!)'.format(user=req_context['user'])
 
 
 def get_bye_secure_ignoring_context(name):
     return 'Goodbye {name} (Secure!)'.format(name=name)
 
+def get_bye_secure_jwt(name, user, token_info):
+    return 'Goodbye {name} (Secure: {user})'.format(name=name, user=user)
 
 def with_problem():
-    return problem(type='http://www.example.com/error',
-                   title='Some Error',
-                   detail='Something went wrong somewhere',
-                   status=418,
-                   instance='instance1',
-                   headers={'x-Test-Header': 'In Test'})
+    raise ProblemException(type='http://www.example.com/error',
+                           title='Some Error',
+                           detail='Something went wrong somewhere',
+                           status=418,
+                           instance='instance1',
+                           headers={'x-Test-Header': 'In Test'})
 
 
 def with_problem_txt():
-    return problem(title='Some Error',
-                   detail='Something went wrong somewhere',
-                   status=418,
-                   instance='instance1')
+    raise ProblemException(title='Some Error',
+                           detail='Something went wrong somewhere',
+                           status=418,
+                           instance='instance1')
 
 
 def internal_error():
@@ -124,6 +131,11 @@ def empty():
 
 def schema(new_stack):
     return new_stack
+
+
+def forward(body):
+    """Return a response with the same payload as in the request body."""
+    return body
 
 
 def schema_response_object(valid):
@@ -206,8 +218,20 @@ def test_required_query_param():
     return ''
 
 
+def test_apikey_query_parameter_validation():
+    return ''
+
+
 def test_array_csv_query_param(items):
     return items
+
+
+def test_array_pipes_form_param3(items):
+    return items['items']
+
+
+def test_array_csv_form_param3(items):
+    return items['items']
 
 
 def test_array_pipes_form_param(items):
@@ -215,6 +239,10 @@ def test_array_pipes_form_param(items):
 
 
 def test_array_csv_form_param(items):
+    return items
+
+
+def test_array_multi_query_param(items):
     return items
 
 
@@ -253,13 +281,22 @@ def test_default_param(name):
 def test_default_object_body(stack):
     return {"stack": stack}
 
+def test_nested_additional_properties(body):
+    return body
 
 def test_default_integer_body(stack_version):
     return stack_version
 
 
+def test_empty_object_body(stack):
+    return {"stack": stack}
+
+
 def test_falsy_param(falsy):
     return falsy
+
+def test_formdata_param3(body):
+    return body["formData"]
 
 
 def test_formdata_param(formData):
@@ -270,7 +307,7 @@ def test_formdata_missing_param():
     return ''
 
 
-def test_formdata_file_upload(formData):
+def test_formdata_file_upload(formData, **kwargs):
     filename = formData.filename
     contents = formData.read().decode('utf-8', 'replace')
     return {filename: contents}
@@ -292,6 +329,18 @@ def test_bool_array_param(thruthiness=None):
 
 def test_required_param(simple):
     return simple
+
+
+def test_exploded_deep_object_param(id):
+    return id
+
+
+def test_nested_exploded_deep_object_param(id):
+    return id
+
+
+def test_exploded_deep_object_param_additional_properties(id):
+    return id
 
 
 def test_redirect_endpoint():
@@ -341,6 +390,14 @@ def test_nullable_param_post(post_param):
     return post_param
 
 
+def test_nullable_param_post3(body):
+    if body is None:
+        return 'it was None'
+    if body["post_param"] is None:
+        return 'it was None'
+    return body["post_param"]
+
+
 def test_nullable_param_put(contents):
     if contents is None:
         return 'it was None'
@@ -372,8 +429,8 @@ def get_empty_dict():
 
 
 def get_custom_problem_response():
-    return problem(403, "You need to pay", "Missing amount",
-                   ext={'amount': 23.0})
+    raise ProblemException(403, "You need to pay", "Missing amount",
+                           ext={'amount': 23.0})
 
 
 def throw_problem_exception():
@@ -392,6 +449,14 @@ def more_than_one_scope_defined(**kwargs):
     return "OK"
 
 
+def optional_auth(**kwargs):
+    key = apikey_info(request.headers.get('X-AUTH'))
+    if key is None:
+        return "Unauthenticated"
+    else:
+        return "Authenticated"
+
+
 def test_args_kwargs(*args, **kwargs):
     return kwargs
 
@@ -405,9 +470,26 @@ def test_param_sanitization(query=None, form=None):
     return result
 
 
+def test_param_sanitization3(query=None, body=None):
+    result = {}
+    if query:
+        result['query'] = query
+    if body:
+        result['form'] = body["form"]
+    return result
+
+
 def test_body_sanitization(body=None):
     return body
 
+def test_body_sanitization_additional_properties(body):
+    return body
+
+def test_body_sanitization_additional_properties_defined(body):
+    return body
+
+def test_body_not_allowed_additional_properties(body):
+    return body
 
 def post_wrong_content_type():
     return "NOT OK"
@@ -444,3 +526,79 @@ def get_httpstatus_response():
 
 def get_bad_default_response(response_code):
     return {}, response_code
+
+
+def get_user():
+    return {'user_id': 7, 'name': 'max'}
+
+
+def get_user_with_password():
+    return {'user_id': 7, 'name': 'max', 'password': '5678'}
+
+
+def post_user(body):
+    body['user_id'] = 8
+    body.pop('password', None)
+    return body
+
+def post_multipart_form(body):
+    x = body['x']
+    x['name'] += "-reply"
+    x['age'] += 10
+    return x
+
+
+def apikey_info(apikey, required_scopes=None):
+    if apikey == 'mykey':
+        return {'sub': 'admin'}
+    return None
+
+
+def jwt_info(token):
+    if token == '100':
+        return {'sub': '100'}
+    return None
+
+
+def get_add_operation_on_http_methods_only():
+    return ""
+
+
+def put_add_operation_on_http_methods_only():
+    return ""
+
+
+def post_add_operation_on_http_methods_only():
+    return ""
+
+
+def delete_add_operation_on_http_methods_only():
+    return ""
+
+
+def options_add_operation_on_http_methods_only():
+    return ""
+
+
+def head_add_operation_on_http_methods_only():
+    return ""
+
+
+def patch_add_operation_on_http_methods_only():
+    return ""
+
+
+def trace_add_operation_on_http_methods_only():
+    return ""
+
+
+def get_datetime():
+    return {'value': datetime.datetime(2000, 1, 2, 3, 4, 5, 6)}
+
+
+def get_date():
+    return {'value': datetime.date(2000, 1, 2)}
+
+
+def get_uuid():
+    return {'value': uuid.UUID(hex='e7ff66d0-3ec2-4c4e-bed0-6e4723c24c51')}

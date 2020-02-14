@@ -20,7 +20,7 @@ class AioHttpApp(AbstractApp):
         self._api_added = False
 
     def create_app(self):
-        return web.Application(debug=self.debug)
+        return web.Application()
 
     def get_root_path(self):
         mod = sys.modules.get(self.import_name)
@@ -79,20 +79,17 @@ class AioHttpApp(AbstractApp):
 
         if debug is not None:
             self.debug = debug
-            self.app._debug = debug
-            for subapp in self.app._subapps:
-                subapp._debug = debug
 
         logger.debug('Starting %s HTTP server..', self.server, extra=vars(self))
 
         if self.server == 'aiohttp':
             logger.info('Listening on %s:%s..', self.host, self.port)
 
-            access_log = options.get('access_log')
+            access_log = options.pop('access_log', None)
 
-            if options.get('use_default_access_log'):
+            if options.pop('use_default_access_log', None):
                 access_log = logger
 
-            web.run_app(self.app, port=self.port, host=self.host, access_log=access_log)
+            web.run_app(self.app, port=self.port, host=self.host, access_log=access_log, **options)
         else:
             raise Exception('Server {} not recognized'.format(self.server))

@@ -5,7 +5,7 @@ Quickstart
 Prerequisites
 -------------
 
-Python 2.7 or Python 3.4+
+Python 3.6+
 
 Installing It
 -------------
@@ -14,19 +14,19 @@ In your command line, type this:
 
 .. code-block:: bash
 
-    $ pip install connexion
+    $ pip install connexion[swagger-ui]
 
 
 Running It
 ----------
 
-Put your API YAML inside a folder in the root path of your application (e.g ``swagger\``) and then do
+Put your API YAML inside a folder in the root path of your application (e.g ``openapi/``) and then do
 
 .. code-block:: python
 
     import connexion
 
-    app = connexion.FlaskApp(__name__, specification_dir='swagger/')
+    app = connexion.FlaskApp(__name__, specification_dir='openapi/')
     app.add_api('my_api.yaml')
     app.run(port=8080)
 
@@ -41,7 +41,7 @@ for each specific API in the `connexion.App#add_api` method:
 
 .. code-block:: python
 
-    app = connexion.FlaskApp(__name__, specification_dir='swagger/',
+    app = connexion.FlaskApp(__name__, specification_dir='openapi/',
                         arguments={'global': 'global_value'})
     app.add_api('my_api.yaml', arguments={'api_local': 'local_value'})
     app.run(port=8080)
@@ -58,8 +58,9 @@ You can disable the Swagger UI at the application level:
 
 .. code-block:: python
 
-    app = connexion.FlaskApp(__name__, specification_dir='swagger/',
-                        swagger_ui=False)
+    options = {"swagger_ui": False}
+    app = connexion.FlaskApp(__name__, specification_dir='openapi/',
+                        options=options)
     app.add_api('my_api.yaml')
 
 
@@ -67,8 +68,21 @@ You can also disable it at the API level:
 
 .. code-block:: python
 
-    app = connexion.FlaskApp(__name__, specification_dir='swagger/')
-    app.add_api('my_api.yaml', swagger_ui=False)
+    options = {"swagger_ui": False}
+    app = connexion.FlaskApp(__name__, specification_dir='openapi/')
+    app.add_api('my_api.yaml', options=options)
+
+You can pass custom Swagger UI `Configuration Parameters`_ like e.g.
+`displayOperationId` through the `swagger_ui_config` option:
+
+.. code-block:: python
+
+    options = {"swagger_ui_config": {"displayOperationId": True}}
+    app = connexion.FlaskApp(__name__, specification_dir='openapi/',
+                        options=options)
+
+
+.. _Configuration Parameters: https://swagger.io/docs/open-source-tools/swagger-ui/usage/configuration/#parameters
 
 Server Backend
 --------------
@@ -79,7 +93,7 @@ to ``tornado`` or ``gevent``:
 
     import connexion
 
-    app = connexion.FlaskApp(__name__, port = 8080, specification_dir='swagger/', server='tornado')
+    app = connexion.FlaskApp(__name__, port = 8080, specification_dir='openapi/', server='tornado')
 
 
 Connexion has the ``aiohttp`` framework as server backend too:
@@ -88,11 +102,9 @@ Connexion has the ``aiohttp`` framework as server backend too:
 
     import connexion
 
-    app = connexion.AioHttpApp(__name__, port = 8080, specification_dir='swagger/')
+    app = connexion.AioHttpApp(__name__, port = 8080, specification_dir='openapi/')
 
 
 .. _Jinja2: http://jinja.pocoo.org/
-.. _swagger.spec: https://github.com/swagger-api/swagger-spec/blob/master/versions/2.0.md
-.. _swagger.spec.operation: https://github.com/swagger-api/swagger-spec/blob/master/versions/2.0.md#operation-object
 .. _Tornado: http://www.tornadoweb.org/en/stable/
 .. _gevent: http://www.gevent.org/

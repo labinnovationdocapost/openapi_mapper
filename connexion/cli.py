@@ -3,9 +3,8 @@ import sys
 from os import path
 
 import click
-from clickclick import AliasedGroup, fatal_error
-
 import connexion
+from clickclick import AliasedGroup, fatal_error
 from connexion.mock import MockResolver
 
 logger = logging.getLogger('connexion.cli')
@@ -74,7 +73,7 @@ def main():
               help='Returns status code 501, and `Not Implemented Yet` payload, for '
               'the endpoints which handlers are not found.',
               is_flag=True, default=False)
-@click.option('--mock', metavar='MOCKMODE', type=click.Choice(['all', 'notimplemented']),
+@click.option('--mock', type=click.Choice(['all', 'notimplemented']),
               help='Returns example data for all endpoints or for which handlers are not found.')
 @click.option('--hide-spec',
               help='Hides the API spec in JSON format which is by default available at `/swagger.json`.',
@@ -181,13 +180,18 @@ def run(spec_file,
     app_cls = connexion.utils.get_function_from_name(
       AVAILABLE_APPS[app_framework]
     )
+
+    options = {
+        "serve_spec": not hide_spec,
+        "swagger_path": console_ui_from or None,
+        "swagger_ui": not hide_console_ui,
+        "swagger_url": console_ui_url or None
+    }
+
     app = app_cls(__name__,
-                  swagger_json=not hide_spec,
-                  swagger_ui=not hide_console_ui,
-                  swagger_path=console_ui_from or None,
-                  swagger_url=console_ui_url or None,
+                  debug=debug,
                   auth_all_paths=auth_all_paths,
-                  debug=debug)
+                  options=options)
 
     app.add_api(spec_file_full_path,
                 base_path=base_path,

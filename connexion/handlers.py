@@ -1,9 +1,11 @@
 import logging
 
-from .operation import Operation, SecureOperation
-from .problem import problem
+from .operations.secure import SecureOperation
+from .exceptions import AuthenticationProblem, ResolverProblem
 
 logger = logging.getLogger('connexion.handlers')
+
+RESOLVER_ERROR_ENDPOINT_RANDOM_DIGITS = 6
 
 
 class AuthErrorHandler(SecureOperation):
@@ -25,7 +27,7 @@ class AuthErrorHandler(SecureOperation):
         :type security_definitions: dict
         """
         self.exception = exception
-        SecureOperation.__init__(self, api, security, security_definitions)
+        super(AuthErrorHandler, self).__init__(api, security, security_definitions)
 
     @property
     def function(self):
@@ -35,41 +37,49 @@ class AuthErrorHandler(SecureOperation):
         security_decorator = self.security_decorator
         logger.debug('... Adding security decorator (%r)', security_decorator, extra=vars(self))
         function = self.handle
-        function = self._request_begin_lifecycle_decorator(function)
         function = security_decorator(function)
-        function = self._request_end_lifecycle_decorator(function)
+        function = self._request_response_decorator(function)
         return function
 
     def handle(self, *args, **kwargs):
         """
         Actual handler for the execution after authentication.
         """
-        response = problem(
+        raise AuthenticationProblem(
             title=self.exception.name,
             detail=self.exception.description,
             status=self.exception.code
         )
-        return self.api.get_response(response)
 
 
-class ResolverErrorHandler(Operation):
+class ResolverErrorHandler(SecureOperation):
     """
     Handler for responding to ResolverError.
     """
 
-    def __init__(self, api, status_code, exception, *args, **kwargs):
+    def __init__(self, api, status_code, exception, security, security_definitions):
         self.status_code = status_code
         self.exception = exception
-        Operation.__init__(self, api, *args, **kwargs)
+        super(ResolverErrorHandler, self).__init__(api, security, security_definitions)
 
     @property
     def function(self):
         return self.handle
 
     def handle(self, *args, **kwargs):
-        response = problem(
+        raise ResolverProblem(
             title='Not Implemented',
             detail=self.exception.reason,
             status=self.status_code
         )
-        return self.api.get_response(response)
+
+    @property
+    def operation_id(self):
+        return "noop"
+
+    @property
+    def randomize_endpoint(self):
+        return RESOLVER_ERROR_ENDPOINT_RANDOM_DIGITS
+
+    def get_path_parameter_types(self):
+        return {}
