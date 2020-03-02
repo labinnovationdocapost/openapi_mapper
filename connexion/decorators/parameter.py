@@ -140,7 +140,7 @@ def parameter_to_arg(operation, function, pythonic_params=False,
                     kwargs['model_params'] = query_remainder
                 # Copy query parameters to transform_params for use in documents_controller.transform_document
                 if 'transform_document_async' in function.__name__:
-                    kwargs['transform_params'] = query
+                    kwargs['transform_params'] = query_remainder
         ###################################################
         ################## Leia specific ##################
         ###################################################
