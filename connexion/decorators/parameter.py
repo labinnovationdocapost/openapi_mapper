@@ -15,7 +15,6 @@ try:
 except ImportError:  # pragma: no cover
     import __builtin__ as builtins
 
-
 logger = logging.getLogger(__name__)
 
 # Python 2/3 compatibility:
@@ -123,7 +122,7 @@ def parameter_to_arg(operation, function, pythonic_params=False,
         ################## Leia specific ##################
         ###################################################
         # Add token to each query if present
-        if function.__name__ != 'login_application':
+        if function.__name__ not in ['login_application', 'post_login_application']:
             try:
                 kwargs['token'] = request.headers['token']
             except KeyError:
