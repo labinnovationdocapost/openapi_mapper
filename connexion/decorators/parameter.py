@@ -9,6 +9,7 @@ import keyword
 import logging
 import re
 from typing import Any
+from copy import deepcopy
 
 import inflection
 
@@ -116,6 +117,33 @@ def parameter_to_arg(operation, function, pythonic_params=False,
         # attempt to provide the request context to the function
         if pass_context_arg_name and (has_kwargs or pass_context_arg_name in arguments):
             kwargs[pass_context_arg_name] = request.context
+
+        ###################################################
+        ################## Leia specific ##################
+        ###################################################
+        # Add token to each query if present
+        if function.__name__ not in ['login_application', 'post_login_application']:
+            try:
+                kwargs['token'] = request.headers['token']
+            except KeyError:
+                pass
+
+        if len(query) != 0:
+            query_remainder = deepcopy(query)
+            for key in kwargs:
+                if key in query_remainder:
+                    del query_remainder[key]
+            if len(query_remainder) != 0:
+                # Copy query parameters to model_params for use in models_controller.apply_model
+                if 'apply_model_async' in function.__name__ or 'train_model_async' in function.__name__:
+                    kwargs['model_params'] = query_remainder
+                # Copy query parameters to transform_params for use in documents_controller.transform_document
+                if 'transform_document_async' in function.__name__:
+                    kwargs['transform_params'] = query_remainder
+
+        ###################################################
+        ################## Leia specific ##################
+        ###################################################
 
         return function(**kwargs)
 
