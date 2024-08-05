@@ -59,7 +59,7 @@ paths:
       description: Returns image_version
       operationId: fakeapi.hello.schema_response_string
       produces:
-        - text/plain
+        - application/json
       parameters:
         - name: valid
           in: path
@@ -78,7 +78,7 @@ paths:
       description: Returns image_version
       operationId: fakeapi.hello.schema_response_integer
       produces:
-        - text/plain
+        - application/json
       parameters:
         - name: valid
           in: path
@@ -97,7 +97,7 @@ paths:
       description: Returns image_version
       operationId: fakeapi.hello.schema_response_number
       produces:
-        - text/plain
+        - application/json
       parameters:
         - name: valid
           in: path
@@ -116,7 +116,7 @@ paths:
       description: Returns image_version
       operationId: fakeapi.hello.schema_response_boolean
       produces:
-        - text/plain
+        - application/json
       parameters:
         - name: valid
           in: path
@@ -290,6 +290,21 @@ paths:
       responses:
         200:
           $ref: '#/responses/GeneralList'
+
+  /media_range:
+    post:
+      description: Test media range
+      operationId: fakeapi.hello.test_media_range
+      consumes:
+        - '*/*'
+      parameters:
+        - name: body
+          in: body
+          schema:
+            type: object
+      responses:
+        '200':
+          description: OK
 
 definitions:
   new_stack:

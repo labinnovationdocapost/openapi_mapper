@@ -1,146 +1,159 @@
 Exception Handling
 ==================
-Rendering Exceptions through the Flask Handler
-----------------------------------------------
-Flask by default contains an exception handler, which connexion's app can proxy
-to with the ``add_error_handler`` method. You can hook either on status codes
-or on a specific exception type.
 
-Connexion is moving from returning flask responses on errors to throwing exceptions
-that are a subclass of ``connexion.problem``. So far exceptions thrown in the OAuth
-decorator have been converted.
+Connexion allows you to register custom error handlers to convert Python ``Exceptions`` into HTTP
+problem responses.
 
-Flask Error Handler Example
----------------------------
+You can register error handlers on:
 
-The goal here is to make the api returning the 404 status code
-when there is a NotFoundException (instead of 500)
+- The exception class to handle
+  If this exception class is raised somewhere in your application or the middleware stack,
+  it will be passed to your handler.
+- The HTTP status code to handle
+  Connexion will raise ``starlette.HTTPException`` errors when it encounters any issues
+  with a request or response. You can intercept these exceptions with specific status codes
+  if you want to return custom responses.
 
-.. code-block:: python
+.. tab-set::
 
-    def test_should_return_404(client):
-        invalid_id = 0
-        response = client.get(f"/api/data/{invalid_id}")
-        assert response.status_code == 404
+    .. tab-item:: AsyncApp
+        :sync: AsyncApp
 
+        .. code-block:: python
 
-Firstly, it's possible to declare what Exception must be handled
+            from connexion import AsyncApp
+            from connexion.lifecycle import ConnexionRequest, ConnexionResponse
 
-.. code-block:: python
+            def not_found(request: ConnexionRequest, exc: Exception) -> ConnexionResponse:
+                return ConnexionResponse(status_code=404, body=json.dumps({"error": "NotFound"}))
 
-    # exceptions.py
-    class NotFoundException(RuntimeError):
-        """Not found."""
+            app = AsyncApp(__name__)
+            app.add_error_handler(FileNotFoundError, not_found)
+            app.add_error_handler(404, not_found)
 
-    class MyDataNotFound(NotFoundException):
-        def __init__(self, id):
-            super().__init__(f"ID '{id}' not found.")
+        .. dropdown:: View a detailed reference of the ``add_error_handler`` method
+            :icon: eye
 
+            .. automethod:: connexion.AsyncApp.add_error_handler
+                :noindex:
 
-    # init flask app
-    import connexion
+    .. tab-item:: FlaskApp
+        :sync: FlaskApp
 
-    def not_found_handler(error):
-        return {
-            "detail": str(error),
-            "status": 404,
-            "title": "Not Found",
-        }, 404
+        .. code-block:: python
 
-    def create_app():
+            from connexion import FlaskApp
+            from connexion.lifecycle import ConnexionRequest, ConnexionResponse
 
-        connexion_app = connexion.FlaskApp(
-            __name__, specification_dir="../api/")
-        connexion_app.add_api(
-            "openapi.yaml", validate_responses=True,
-            base_path="/")
+            def not_found(request: ConnexionRequest, exc: Exception) -> ConnexionResponse:
+                return ConnexionResponse(status_code=404, body=json.dumps({"error": "NotFound"}))
 
-        # Handle NotFoundException
-        connexion_app.add_error_handler(
-            NotFoundException, not_found_handler)
+            app = FlaskApp(__name__)
+            app.add_error_handler(FileNotFoundError, not_found)
+            app.add_error_handler(404, not_found)
 
-        app = connexion_app.app
-        return app
+        .. dropdown:: View a detailed reference of the ``add_error_handler`` method
+            :icon: eye
 
-In this way, it's possible to raise anywhere the NotFoundException or its subclasses
-and we know the API will return 404 status code.
+            .. automethod:: connexion.FlaskApp.add_error_handler
+                :noindex:
 
-.. code-block:: python
+        .. note::
 
-    from sqlalchemy.orm.exc import NoResultFound
+            .. warning::
 
-    from .exceptions import MyDataNotFound
-    from .models import MyData
+                ⚠️ **The following is not recommended as it complicates the exception handling logic,**
 
+            You can also register error handlers on the underlying flask application directly.
 
-    def get_my_data(id, token_info=None):
-        try:
-            data = MyData.query.filter(MyData.id == id).one()
+            .. code-block:: python
 
-            return {
-                "id": data.id,
-                "description": data.description,
-            }
+                flask_app = app.app
+                flask_app.register_error_handler(FileNotFoundError, not_found)
+                flask_app.register_error_handler(404, not_found)
 
-        except NoResultFound:
-            raise MyDataNotFound(id)
+            `Flask documentation`_
 
+            Error handlers registered this way:
+
+            - Will only intercept exceptions thrown in the application, not in the Connexion
+              middleware.
+            - Can intercept exceptions before they reach the error handlers registered on the
+              connexion app.
+            - When registered on status code, will intercept only
+              ``werkzeug.exceptions.HTTPException`` thrown by werkzeug / Flask not
+              ``starlette.exceptions.HTTPException``.
+
+    .. tab-item:: ConnexionMiddleware
+        :sync: ConnexionMiddleware
+
+        .. code-block:: python
+
+            from asgi_framework import App
+            from connexion import ConnexionMiddleware
+            from connexion.lifecycle import ConnexionRequest, ConnexionResponse
+
+            def not_found(request: ConnexionRequest, exc: Exception) -> ConnexionResponse:
+                return ConnexionResponse(status_code=404, body=json.dumps({"error": "NotFound"}))
+
+            app = App(__name__)
+            app = ConnexionMiddleware(app)
+
+            app.add_error_handler(FileNotFoundError, not_found)
+            app.add_error_handler(404, not_found)
+
+        .. dropdown:: View a detailed reference of the ``add_error_handler`` method
+            :icon: eye
+
+            .. automethod:: connexion.ConnexionMiddleware.add_error_handler
+                :noindex:
+
+        .. note::
+
+            This might not catch ``HTTPExceptions`` with the same status code raised by
+            your wrapped ASGI/WSGI framework.
+
+.. note::
+
+    Error handlers can be ``async`` coroutines as well.
+
+.. _Flask documentation: https://flask.palletsprojects.com/en/latest/errorhandling/#error-handlers
 
 Default Exception Handling
 --------------------------
 By default connexion exceptions are JSON serialized according to
 `Problem Details for HTTP APIs`_
 
-Application can return errors using ``connexion.problem`` or exceptions that inherit from both
-``connexion.ProblemException`` and a ``werkzeug.exceptions.HttpException`` subclass (for example
-``werkzeug.exceptions.Forbidden``). An example of this is the ``connexion.exceptions.OAuthProblem``
-exception
+Application can return errors using ``connexion.problem.problem`` or raise exceptions that inherit
+either from ``connexion.ProblemException`` or one of its subclasses to achieve the same behavior.
+
+Using this, we can rewrite the handler above:
 
 .. code-block:: python
 
-    class OAuthProblem(ProblemException, Unauthorized):
-        def __init__(self, title=None, **kwargs):
-            super(OAuthProblem, self).__init__(title=title, **kwargs)
+    from connexion.lifecycle import ConnexionRequest, ConnexionResponse
+    from connexion.problem import problem
+
+    def not_found(request: ConnexionRequest, exc: Exception) -> ConnexionResponse:
+        return problem(
+            title="NotFound",
+            detail="The requested resource was not found on the server",
+            status=404,
+        )
+
+.. dropdown:: View a detailed reference of the :code:`problem` function
+    :icon: eye
+
+    .. autofunction:: connexion.problem.problem
 
 .. _Problem Details for HTTP APIs: https://tools.ietf.org/html/draft-ietf-appsawg-http-problem-00
 
-Examples of Custom Rendering Exceptions
----------------------------------------
-To custom render an exception when you boot your connexion application you can hook into a custom
-exception and render it in some sort of custom format. For example
-
-
-.. code-block:: python
-
-    from flask import Response
-    import connexion
-    from connexion.exceptions import OAuthResponseProblem
-
-    def render_unauthorized(exception):
-        return Response(response=json.dumps({'error': 'There is an error in the oAuth token supplied'}), status=401, mimetype="application/json")
-
-    app = connexion.FlaskApp(__name__, specification_dir='./../swagger/', debug=False, swagger_ui=False)
-    app.add_error_handler(OAuthResponseProblem, render_unauthorized)
-
-Custom Exceptions
------------------
+Connexion Exceptions
+--------------------
 There are several exception types in connexion that contain extra information to help you render appropriate
 messages to your user beyond the default description and status code:
 
-OAuthProblem
-^^^^^^^^^^^^
-This exception is thrown when there is some sort of validation issue with the Authorisation Header
-
-OAuthResponseProblem
-^^^^^^^^^^^^^^^^^^^^
-This exception is thrown when there is a validation issue from your OAuth 2 Server. It contains a
-``token_response`` property which contains the full http response from the OAuth 2 Server
-
-OAuthScopeProblem
-^^^^^^^^^^^^^^^^^
-This scope indicates the OAuth 2 Server did not generate a token with all the scopes required. This
-contains 3 properties
-- ``required_scopes`` - The scopes that were required for this endpoint
-- ``token_scopes`` - The scopes that were granted for this endpoint
-
-
+.. automodule:: connexion.exceptions
+    :members:
+    :show-inheritance:
+    :member-order: bysource

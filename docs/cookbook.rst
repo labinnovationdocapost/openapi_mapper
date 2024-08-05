@@ -1,151 +1,147 @@
 Connexion Cookbook
 ==================
 
-This section aims to be a cookbook of possible solutions for specific
-use cases of Connexion.
+This page provides recipes with Connexion as an ingredient.
 
-Wildcard path parameters
-------------------------
+CORS
+----
 
-Path parameters cannot contain slashes by default, but sometimes it's useful
-to have a path parameter which takes the full remainder of the HTTP path
-including slashes, e.g. to allow parsing "my/deep/path" from
-"/pages/my/deep/path". Connexion supports parsing such path remainders
-by using ``format: path``:
-
-.. code-block:: yaml
-
-    paths:
-      /pages/{path}:
-        get:
-         # (...)
-          parameters:
-            - name: "path"
-              in: path
-              description: "Remainder of path, including slashes."
-              schema:
-                type: string
-                format: path
+You can enable CORS (Cross-origin resource sharing) by leveraging the `CORSMiddleware`_ offered by
+Starlette. You can add it to your application, ideally in front of the ``RoutingMiddleware``.
 
 
-Custom type format
-------------------
+.. tab-set::
 
-It is possible to define custom type formats that are going to be used
-by the Connexion payload validation on request parameters and response
-payloads of your API.
+    .. tab-item:: AsyncApp
+        :sync: AsyncApp
 
-Let's say your API deals with Products and you want to define a field
-`price_label` that has a "money" format value. You can create a format
-checker function and register that to be used to validate values of
-the "money" format.
+        .. code-block:: python
+        
+            from pathlib import Path
 
-Example of a possible schema of Product having an attribute with
-"money" format that would be defined in your OpenAPI specification:
-
-.. code-block:: yaml
-
-    type: object
-    properties:
-      title:
-        type: string
-      price_label:
-        type: string
-        format: money
+            from connexion import AsyncApp
+            from connexion.middleware import MiddlewarePosition
+            from starlette.middleware.cors import CORSMiddleware
 
 
-Then we create a format checker function for that type of value:
+            app = AsyncApp(__name__)
 
-.. code-block:: python
+            app.add_middleware(
+                CORSMiddleware,
+                position=MiddlewarePosition.BEFORE_EXCEPTION,
+                allow_origins=["*"],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
 
-    import re
+            app.add_api("openapi.yaml")
 
-    MONEY_RE = re.compile('^\$\s*\d+(\.\d\d)?')
+            if __name__ == "__main__":
+                app.run(f"{Path(__file__).stem}:app", port=8080)
 
-    def is_money(val):
-        if not isinstance(val, str):
-            return True
-        return MONEY_RE.match(val)
+        .. dropdown:: View a detailed reference of the ``add_middleware`` method
+            :icon: eye
 
-The format checker function is expected to return `True` when the
-value matches the expected format and return `False` when it
-doesn't. Also is important to verify if the type of the value you are
-trying to validate is compatible with the format. In our example we
-check if the `val` is of type "string" before performing any further
-checking.
+            .. automethod:: connexion.AsyncApp.add_middleware
+                :noindex:
 
-The final step to make it work is registering our `is_money` function
-to the format "money" in json_schema library. For that, we can use the
-draft4 format checker decorator.
+    .. tab-item:: FlaskApp
+        :sync: FlaskApp
 
-.. code-block:: python
+        .. code-block:: python
+        
+            from pathlib import Path
 
-    from jsonschema import draft4_format_checker
-
-    @draft4_format_checker.checks('money')
-    def is_money(val):
-        ...
-
-This is all you need to have validation for that format in your
-Connexion application. Keep in mind that the format checkers should be
-defined and registered before you run your application server. A full
-example can be found at
-https://gist.github.com/rafaelcaricio/6e67286a522f747405a7299e6843cd93
+            from connexion import FlaskApp
+            from connexion.middleware import MiddlewarePosition
+            from starlette.middleware.cors import CORSMiddleware
 
 
-CORS Support
-------------
+            app = FlaskApp(__name__)
 
-CORS_ (Cross-origin resource sharing) is not built into Connexion, but you can use the `flask-cors`_ library
-to set CORS headers:
+            app.add_middleware(
+                CORSMiddleware,
+                position=MiddlewarePosition.BEFORE_EXCEPTION,
+                allow_origins=["*"],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
 
-.. code-block:: python
+            app.add_api("openapi.yaml")
 
-    import connexion
-    from flask_cors import CORS
+            if __name__ == "__main__":
+                app.run(f"{Path(__file__).stem}:app", port=8080)
 
-    app = connexion.FlaskApp(__name__)
-    app.add_api('swagger.yaml')
+        .. dropdown:: View a detailed reference of the ``add_middleware`` method
+            :icon: eye
 
-    # add CORS support
-    CORS(app.app)
+            .. automethod:: connexion.FlaskApp.add_middleware
+                :noindex:
 
-    app.run(port=8080)
+    .. tab-item:: ConnexionMiddleware
+        :sync: ConnexionMiddleware
 
+        .. code-block:: python
+        
+            from pathlib import Path
 
-.. _CORS: https://en.wikipedia.org/wiki/Cross-origin_resource_sharing
-.. _flask-cors: https://flask-cors.readthedocs.io/
+            from asgi_framework import App
+            from connexion import ConnexionMiddleware
+            from starlette.middleware.cors import CORSMiddleware
 
+            app = App(__name__)
+            app = ConnexionMiddleware(app)
 
-Logging
-------------
+            app.add_middleware(
+                CORSMiddleware,
+                position=MiddlewarePosition.BEFORE_EXCEPTION,
+                allow_origins=["*"],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
 
-You can customize logging accessing the `_flask-logger` directly
-or configuring the logger via dictConfig.
-Remember that you should configure logging for your project as soon
-as possible when the program starts or you'll get the default configuration.
+            app.add_api("openapi.yaml")
 
-.. code-block:: python
-
-    import connexion
-    from logging.config import dictConfig
-
-
-    dictConfig({
-        'version': 1,
-        'handlers': {
-            'syslog': {
-            'class': 'logging.handlers.SysLogHandler'
-            }
-        },
-        'root': {
-           'handlers': ['syslog']
-        }
-    })
-    app = connexion.FlaskApp(__name__)
-    app.app.logger.warn("I configured the flask logger!")
-    app.add_api('swagger.yaml')
-    app.run(port=8080)
+            if __name__ == "__main__":
+                app.run(f"{Path(__file__).stem}:app", port=8080)
 
 
-.. _flask-logger: http://flask.pocoo.org/docs/1.0/logging/
+        .. dropdown:: View a detailed reference of the ``add_middleware`` method
+            :icon: eye
+
+            .. automethod:: connexion.ConnexionMiddleware.add_middleware
+                :noindex:
+
+.. _CORSMiddleware: https://www.starlette.io/middleware/#corsmiddleware
+
+Reverse Proxy
+-------------
+
+When running behind a reverse proxy with stripped path prefix, you need to configure your
+application to properly handle this.
+
+Single known path prefix
+''''''''''''''''''''''''
+
+If there is only a single known prefix your application will be running behind, you can simply
+pass this path prefix as the `root_path` to your ASGI server:
+
+.. code-block:: bash
+
+    $ uvicorn run:app --root-path <root_path>
+
+.. code-block:: bash
+
+    $ gunicorn -k uvicorn.workers.UvicornWorker run:app --root-path <root_path>
+
+
+Dynamic path prefix
+'''''''''''''''''''
+
+If you are running behind multiple proxies, or the path is not known, you can wrap your
+application in a `ReverseProxied` middleware as shown in `this example`_.
+
+.. _this example: https://github.com/spec-first/connexion/tree/main/examples/reverseproxy
